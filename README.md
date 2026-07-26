@@ -98,7 +98,3 @@ This plugin only ever records your own character's tile position,
 movement, and bank-open events, all timestamped. It does not read
 chat, inventory contents, other players, or anything beyond location
 and the three event types above.
-
-## Status
-
-Actively developed as a personal project. Feedback and issues welcome.
