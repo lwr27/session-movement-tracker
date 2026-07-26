@@ -25,7 +25,7 @@ import net.runelite.api.Player;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
-import net.runelite.api.widgets.WidgetInfo;
+import net.runelite.api.gameval.InterfaceID;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
@@ -250,7 +250,7 @@ public class RouteTrackerPlugin extends Plugin
 
 	private void checkBank(WorldPoint current, long now)
 	{
-		boolean bankOpenNow = client.getWidget(WidgetInfo.BANK_CONTAINER) != null;
+		boolean bankOpenNow = client.getWidget(InterfaceID.Bankmain.UNIVERSE) != null;
 		if (bankOpenNow && !bankWasOpen)
 		{
 			activeSession.events.add(RouteEvent.bank(toArr(current), now));
