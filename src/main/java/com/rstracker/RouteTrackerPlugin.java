@@ -414,6 +414,11 @@ public class RouteTrackerPlugin extends Plugin
 	 */
 	private void maybeUploadToGitHub(File file)
 	{
+		if (!config.enableGithubUpload())
+		{
+			return; // opt-in toggle is off - no network call happens, full stop
+		}
+
 		String repo = config.githubRepo() == null ? "" : config.githubRepo().trim();
 		String token = config.githubToken() == null ? "" : config.githubToken().trim();
 
@@ -448,6 +453,11 @@ public class RouteTrackerPlugin extends Plugin
 
 	private void uploadFileToGitHub(File file, String repo, String token) throws Exception
 	{
+		if (!config.enableGithubUpload())
+		{
+			return; // belt-and-braces check - this method makes an OkHttp call itself
+		}
+
 		byte[] contentBytes = Files.readAllBytes(file.toPath());
 		String base64Content = Base64.getEncoder().encodeToString(contentBytes);
 		String path = GITHUB_UPLOAD_PATH_PREFIX + file.getName();
@@ -494,6 +504,11 @@ public class RouteTrackerPlugin extends Plugin
 	 */
 	private String fetchExistingSha(String apiUrl, String token)
 	{
+		if (!config.enableGithubUpload())
+		{
+			return null; // belt-and-braces check - this method makes an OkHttp call itself
+		}
+
 		Request request = new Request.Builder()
 			.url(apiUrl)
 			.header("Authorization", "token " + token)
