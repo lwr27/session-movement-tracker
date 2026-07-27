@@ -1,8 +1,8 @@
 # Session Movement Tracker
 
 A RuneLite plugin that records a session-by-session timeline of your
-character's movement — walking, running, teleports, and bank visits —
-to a local file on your own computer.
+character's movement, including walking, running, teleports, and bank
+visits, all saved to a local file on your own computer.
 
 It was built to power a companion web map (a personal OSRS XP/activity
 tracker) that replays your sessions as an animated route on an
@@ -15,17 +15,17 @@ and when.
 For each play session (login to logout), the plugin records a
 chronological list of events:
 
-- **Walks** — every continuous stretch of ground movement, stored as
+- **Walks** - every continuous stretch of ground movement, stored as
   a start tile, an end tile, and (only where you actually turned a
   corner) a list of waypoints tracing the real shape of the path. A
   straight run costs nothing extra to record; a winding route costs
   one point per turn, not one per tile.
-- **Teleports** — any jump further than a normal step (the distance
+- **Teleports** - any jump further than a normal step (the distance
   threshold is configurable), or any move between planes/floors. Where
   possible, the destination is matched against a small built-in table
   of known teleport locations and labelled (e.g. "Lumbridge Home
   Teleport").
-- **Bank visits** — the moment a bank interface is opened.
+- **Bank visits** - the moment a bank interface is opened.
 
 Sessions that are interrupted by a crash or force-close and resumed
 within a few minutes are merged back into the same session rather than
@@ -46,14 +46,14 @@ you explicitly opt in (see below).
 
 Two config fields, both blank by default:
 
-- **GitHub repo** — an `owner/repo` you control (e.g. `you/your-map-repo`)
-- **GitHub token** — a Personal Access Token with write access to that
+- **GitHub repo** - an `owner/repo` you control (e.g. `you/your-map-repo`)
+- **GitHub token** - a Personal Access Token with write access to that
   repo's contents
 
 If you fill in *both*, the plugin will also push your local file to
 `docs/route-data/<account-hash>-<year>-<month>.json` in that repo
 every time it saves. Leave either field blank and everything stays
-fully local — this is entirely optional and off by default.
+fully local; this is entirely optional and off by default.
 
 **Be aware:** if enabled, this uploads your account hash and every
 location you visit to the repository you specify. Only point it at a
