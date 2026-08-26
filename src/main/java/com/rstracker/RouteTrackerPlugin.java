@@ -26,6 +26,7 @@ import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.gameval.InterfaceID;
+import net.runelite.client.RuneLite;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
@@ -347,7 +348,13 @@ public class RouteTrackerPlugin extends Plugin
 	{
 		String accountKey = String.valueOf(client.getAccountHash());
 		String month = MONTH_FMT.format(Instant.ofEpochSecond(epochSeconds));
-		File dir = new File(System.getProperty("user.home"), ".runelite/route-tracker");
+		// Uses RuneLite's own RUNELITE_DIR rather than System.getProperty(
+		// "user.home") directly - RUNELITE_DIR is what RuneLite itself
+		// resolves the client's actual .runelite directory to (correctly
+		// handling custom/portable install locations), so plugins should
+		// key off it rather than re-deriving user.home themselves. Each
+		// plugin gets its own subdirectory underneath it.
+		File dir = new File(RuneLite.RUNELITE_DIR, "route-tracker");
 		dir.mkdirs();
 		return new File(dir, accountKey + "-" + month + ".json");
 	}
