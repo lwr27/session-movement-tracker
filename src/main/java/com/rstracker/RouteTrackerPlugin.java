@@ -15,16 +15,22 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.Player;
+import net.runelite.api.Skill;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
+import net.runelite.api.events.StatChanged;
+import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.client.RuneLite;
 import net.runelite.client.config.ConfigManager;
@@ -82,14 +88,31 @@ public class RouteTrackerPlugin extends Plugin
 	// stored flat as x,y,x,y,... - see recordMovement() for why only turns
 	// are kept rather than every tile.
 	private List<Integer> walkWaypoints = new ArrayList<>();
+	// Run state (0/1) captured alongside each recorded point of the current
+	// walk segment - index 0 is the segment start, then one per waypoint,
+	// with the final point's state appended when the segment closes. Lets
+	// the map colour a route by how it was actually travelled rather than
+	// inferring speed from an averaged segment duration.
+	private List<Integer> walkRunStates = new ArrayList<>();
 	// Sign-normalised direction of the last movement (-1/0/1 per axis), so
 	// walking and running (which covers 2 tiles per tick) both compare
 	// equally - what matters is the heading, not the distance covered.
 	private int lastDirX = 0;
 	private int lastDirY = 0;
+	// Run state as of the most recently processed movement tick, tracked
+	// separately from walkRunStates - lets recordMovement() detect a
+	// mid-straight-line run toggle (no direction change at all) as its own
+	// trigger for a waypoint, not just turns.
+	private int lastRunState = 0;
 
 	private Session activeSession;
 	private int ticksSinceFlush = 0;
+	private int ticksSinceUpload = 0;
+	// Baseline XP per skill, captured so each flush can record only what
+	// changed since the previous one rather than absolute totals. Null
+	// until the first StatChanged has been seen for that skill.
+	private final Map<Skill, Integer> lastXpBySkill = new EnumMap<>(Skill.class);
+	private final Map<Skill, Integer> pendingXpGains = new EnumMap<>(Skill.class);
 	// Guards against two uploads overlapping if one happens to still be in
 	// flight (slow connection, GitHub API hiccup) when the next flush fires.
 	private volatile boolean uploadInProgress = false;
@@ -110,6 +133,16 @@ public class RouteTrackerPlugin extends Plugin
 
 	private static final DateTimeFormatter MONTH_FMT =
 		DateTimeFormatter.ofPattern("yyyy-MM").withZone(ZoneOffset.UTC);
+	// Uploaded files are now per-day rather than per-month: a month file
+	// grows all month, so every upload late in the month re-sends a large
+	// mostly-unchanged payload just to append one new session.
+	private static final DateTimeFormatter DAY_FMT =
+		DateTimeFormatter.ofPattern("yyyy-MM-dd").withZone(ZoneOffset.UTC);
+	// Matches the OLD flat local filename layout (<hash>-yyyy-MM.json sitting
+	// directly in route-tracker/) so retention can clean those up too, not
+	// just the per-month folders new saves use.
+	private static final java.util.regex.Pattern LEGACY_FILE_PATTERN =
+		java.util.regex.Pattern.compile("^-?\\d+-(\\d{4}-\\d{2})\\.json$");
 
 	@Override
 	protected void startUp()
@@ -120,7 +153,11 @@ public class RouteTrackerPlugin extends Plugin
 		bankWasOpen = false;
 		activeSession = null;
 		ticksSinceFlush = 0;
+		ticksSinceUpload = 0;
+		lastXpBySkill.clear();
+		pendingXpGains.clear();
 		resetWaypoints();
+		pruneOldLocalData();
 	}
 
 	@Override
@@ -128,7 +165,7 @@ public class RouteTrackerPlugin extends Plugin
 	{
 		closeWalkSegmentIfAny();
 		closeSessionCleanly();
-		flushToDisk();
+		flushToDisk(true);
 	}
 
 	@Subscribe
@@ -138,12 +175,44 @@ public class RouteTrackerPlugin extends Plugin
 		{
 			closeWalkSegmentIfAny();
 			closeSessionCleanly();
-			flushToDisk();
+			flushToDisk(true);
+			lastXpBySkill.clear();
+			pendingXpGains.clear();
 			lastTile = null;
 			walkSegmentStart = null;
 			idleTicks = 0;
 			activeSession = null;
 			resetWaypoints();
+		}
+	}
+
+	/**
+	 * Accumulates XP gains between flushes. RuneLite fires StatChanged very
+	 * frequently (potentially several times a second while training), so
+	 * nothing is written here - gains are just totalled up in memory and
+	 * emitted as a single event per flush cycle by captureXpDeltas().
+	 */
+	@Subscribe
+	public void onStatChanged(StatChanged event)
+	{
+		if (!config.trackXpGains())
+		{
+			return;
+		}
+
+		Skill skill = event.getSkill();
+		int xp = event.getXp();
+		Integer previous = lastXpBySkill.put(skill, xp);
+		// First sighting of a skill just establishes the baseline - the
+		// jump from "unknown" to the account's lifetime total is not a gain.
+		if (previous == null)
+		{
+			return;
+		}
+		int delta = xp - previous;
+		if (delta > 0)
+		{
+			pendingXpGains.merge(skill, delta, Integer::sum);
 		}
 	}
 
@@ -230,23 +299,53 @@ public class RouteTrackerPlugin extends Plugin
 		boolean hadDirection = (lastDirX != 0 || lastDirY != 0);
 		boolean turned = hadDirection && (dirX != lastDirX || dirY != lastDirY);
 
-		if (turned && walkWaypoints.size() / 2 < MAX_WAYPOINTS_PER_SEGMENT)
+		// A run toggle mid-straight-line involves no direction change at
+		// all, so on its own `turned` would never fire and the toggle
+		// would silently fall between whatever turn-based waypoints happen
+		// to exist either side of it. Treating a run-state change as its
+		// own trigger - even without a turn - closes that gap.
+		int runNow = currentRunState();
+		boolean runChanged = runNow != lastRunState;
+
+		if ((turned || runChanged) && walkWaypoints.size() / 2 < MAX_WAYPOINTS_PER_SEGMENT)
 		{
-			// The turn happened AT lastTile - that's the corner worth
-			// keeping, not the tile we've just arrived at.
+			// The change happened AT lastTile - that's the corner (or the
+			// point run was toggled) worth keeping, not the tile we've
+			// just arrived at.
 			walkWaypoints.add(lastTile.getX());
 			walkWaypoints.add(lastTile.getY());
+			walkRunStates.add(runNow);
 		}
 
 		lastDirX = dirX;
 		lastDirY = dirY;
+		lastRunState = runNow;
 	}
 
 	private void resetWaypoints()
 	{
 		walkWaypoints.clear();
+		walkRunStates.clear();
+		// Seeded with the state at the segment's start point, so the run
+		// state list always lines up 1:1 with the segment's implied point
+		// list (start, waypoints..., end). lastRunState mirrors it so the
+		// very first movement tick of a new segment isn't wrongly treated
+		// as a run-state change against a stale value from the previous
+		// segment.
+		int startRunState = currentRunState();
+		walkRunStates.add(startRunState);
+		lastRunState = startRunState;
 		lastDirX = 0;
 		lastDirY = 0;
+	}
+
+	/**
+	 * 1 if run is currently enabled, 0 otherwise. Read from the same
+	 * varplayer the client's own run orb uses.
+	 */
+	private int currentRunState()
+	{
+		return client.getVarpValue(VarPlayerID.OPTION_RUN) == 1 ? 1 : 0;
 	}
 
 	private void checkBank(WorldPoint current, long now)
@@ -264,9 +363,13 @@ public class RouteTrackerPlugin extends Plugin
 		if (activeSession != null && walkSegmentStart != null && lastTile != null
 			&& !walkSegmentStart.equals(lastTile))
 		{
+			// Final point's run state completes the list before it's frozen
+			// into the event - see RouteEvent.walk for how a constant state
+			// across the whole segment collapses to a single value.
+			walkRunStates.add(currentRunState());
 			activeSession.events.add(RouteEvent.walk(
 				toArr(walkSegmentStart), toArr(lastTile), waypointsToArr(),
-				walkSegmentStartTime, Instant.now().getEpochSecond()));
+				runStatesToArr(), walkSegmentStartTime, Instant.now().getEpochSecond()));
 		}
 		walkSegmentStart = lastTile;
 		walkSegmentStartTime = Instant.now().getEpochSecond();
@@ -285,6 +388,46 @@ public class RouteTrackerPlugin extends Plugin
 			arr[i] = walkWaypoints.get(i);
 		}
 		return arr;
+	}
+
+	private int[] runStatesToArr()
+	{
+		if (walkRunStates.isEmpty())
+		{
+			return null;
+		}
+		int[] arr = new int[walkRunStates.size()];
+		for (int i = 0; i < walkRunStates.size(); i++)
+		{
+			arr[i] = walkRunStates.get(i);
+		}
+		return arr;
+	}
+
+	/**
+	 * Emits everything accumulated by onStatChanged since the last flush as
+	 * a single event tagged with the player's current position, then clears
+	 * the accumulator. Does nothing when the feature is off or no XP was
+	 * gained - so a session with no training adds no xp events at all.
+	 */
+	private void captureXpDeltas()
+	{
+		if (!config.trackXpGains() || pendingXpGains.isEmpty() || activeSession == null)
+		{
+			return;
+		}
+		Player localPlayer = client.getLocalPlayer();
+		if (localPlayer == null)
+		{
+			return;
+		}
+
+		Map<String, Integer> gains = new HashMap<>();
+		pendingXpGains.forEach((skill, amount) -> gains.put(skill.getName(), amount));
+		pendingXpGains.clear();
+
+		activeSession.events.add(RouteEvent.xp(
+			toArr(localPlayer.getWorldLocation()), gains, Instant.now().getEpochSecond()));
 	}
 
 	private void closeSessionCleanly()
@@ -333,30 +476,138 @@ public class RouteTrackerPlugin extends Plugin
 		return s.end != null ? Math.max(latest, s.end) : latest;
 	}
 
+	/**
+	 * Local saves and GitHub uploads run on independent timers. Saving is
+	 * cheap and frequent (crash safety); uploading creates a commit every
+	 * time, so doing it as often as saving would generate a large amount of
+	 * unnecessary commit history for no benefit - uploaded data is only
+	 * ever read back retrospectively, never watched live.
+	 */
 	private void maybeFlush()
 	{
 		ticksSinceFlush++;
+		ticksSinceUpload++;
+
 		int flushEveryTicks = Math.max(1, (config.flushIntervalSeconds() * 1000) / TICK_MILLIS);
-		if (ticksSinceFlush >= flushEveryTicks)
+		int uploadEveryTicks = Math.max(1, (config.uploadIntervalSeconds() * 1000) / TICK_MILLIS);
+
+		boolean shouldUpload = ticksSinceUpload >= uploadEveryTicks;
+		if (ticksSinceFlush >= flushEveryTicks || shouldUpload)
 		{
-			flushToDisk();
+			flushToDisk(shouldUpload);
 			ticksSinceFlush = 0;
+			if (shouldUpload)
+			{
+				ticksSinceUpload = 0;
+			}
 		}
 	}
 
+	/**
+	 * Base plugin directory. Uses RuneLite's own RUNELITE_DIR rather than
+	 * System.getProperty("user.home") directly - RUNELITE_DIR is what
+	 * RuneLite itself resolves the client's actual .runelite directory to
+	 * (correctly handling custom/portable install locations), so plugins
+	 * should key off it rather than re-deriving user.home themselves.
+	 */
+	private File baseDir()
+	{
+		File dir = new File(RuneLite.RUNELITE_DIR, "route-tracker");
+		dir.mkdirs();
+		return dir;
+	}
+
+	/**
+	 * Local data is organised as route-tracker/&lt;yyyy-MM&gt;/&lt;hash&gt;-&lt;yyyy-MM-dd&gt;.json
+	 * - one file per account per day, inside a folder per month. The folder
+	 * layout is what makes retention simple: an expired month is one
+	 * directory to delete rather than a filename-matching sweep.
+	 */
 	private File dataFile(long epochSeconds)
 	{
 		String accountKey = String.valueOf(client.getAccountHash());
-		String month = MONTH_FMT.format(Instant.ofEpochSecond(epochSeconds));
-		// Uses RuneLite's own RUNELITE_DIR rather than System.getProperty(
-		// "user.home") directly - RUNELITE_DIR is what RuneLite itself
-		// resolves the client's actual .runelite directory to (correctly
-		// handling custom/portable install locations), so plugins should
-		// key off it rather than re-deriving user.home themselves. Each
-		// plugin gets its own subdirectory underneath it.
-		File dir = new File(RuneLite.RUNELITE_DIR, "route-tracker");
-		dir.mkdirs();
-		return new File(dir, accountKey + "-" + month + ".json");
+		Instant instant = Instant.ofEpochSecond(epochSeconds);
+		File monthDir = new File(baseDir(), MONTH_FMT.format(instant));
+		monthDir.mkdirs();
+		return new File(monthDir, accountKey + "-" + DAY_FMT.format(instant) + ".json");
+	}
+
+	/**
+	 * Deletes local data older than the configured retention window.
+	 * Handles BOTH layouts: whole month folders from the current layout,
+	 * and leftover flat &lt;hash&gt;-yyyy-MM.json files from the older one, so
+	 * upgrading doesn't leave old data stranded and never cleaned up.
+	 *
+	 * Only ever touches local files - anything already uploaded to GitHub
+	 * is deliberately left alone.
+	 */
+	private void pruneOldLocalData()
+	{
+		int months = config.retentionMonths();
+		if (months <= 0)
+		{
+			return; // 0 (or negative) means keep everything forever
+		}
+
+		String cutoff = MONTH_FMT.format(
+			Instant.now().atZone(ZoneOffset.UTC).minusMonths(months).toInstant());
+
+		File[] entries = baseDir().listFiles();
+		if (entries == null)
+		{
+			return;
+		}
+
+		for (File entry : entries)
+		{
+			try
+			{
+				String expiredMonth = null;
+				if (entry.isDirectory() && entry.getName().matches("\\d{4}-\\d{2}"))
+				{
+					expiredMonth = entry.getName();
+				}
+				else if (entry.isFile())
+				{
+					java.util.regex.Matcher m = LEGACY_FILE_PATTERN.matcher(entry.getName());
+					if (m.matches())
+					{
+						expiredMonth = m.group(1);
+					}
+				}
+
+				// String comparison is safe here: yyyy-MM sorts
+				// chronologically as text.
+				if (expiredMonth != null && expiredMonth.compareTo(cutoff) < 0)
+				{
+					deleteRecursively(entry);
+					log.debug("Pruned expired route data: {}", entry.getName());
+				}
+			}
+			catch (Exception e)
+			{
+				log.warn("Could not prune route data entry {}", entry.getName(), e);
+			}
+		}
+	}
+
+	private void deleteRecursively(File file)
+	{
+		if (file.isDirectory())
+		{
+			File[] children = file.listFiles();
+			if (children != null)
+			{
+				for (File child : children)
+				{
+					deleteRecursively(child);
+				}
+			}
+		}
+		if (!file.delete())
+		{
+			log.debug("Could not delete {}", file.getAbsolutePath());
+		}
 	}
 
 	private List<Session> readSessions(File file)
@@ -382,8 +633,13 @@ public class RouteTrackerPlugin extends Plugin
 		return result;
 	}
 
-	private synchronized void flushToDisk()
+	private synchronized void flushToDisk(boolean alsoUpload)
 	{
+		// Fold in anything accumulated since the last flush before deciding
+		// whether there's data worth writing - during stationary training
+		// this is the only thing that produces events at all.
+		captureXpDeltas();
+
 		if (activeSession == null || activeSession.events.isEmpty())
 		{
 			return;
@@ -404,7 +660,10 @@ public class RouteTrackerPlugin extends Plugin
 				gson.toJson(existing, writer);
 			}
 
-			maybeUploadToGitHub(file);
+			if (alsoUpload)
+			{
+				maybeUploadToGitHub(file);
+			}
 		}
 		catch (Exception e)
 		{
