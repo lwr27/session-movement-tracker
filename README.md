@@ -73,7 +73,8 @@ Two config fields, both blank by default:
 
 If you fill in *both* (and turn the upload toggle on), the plugin will
 push your local file to
-`docs/route-data/<account-hash>-<year>-<month>-<day>.json` in that repo
+`docs/route-data/<account-hash>/<year>-<month>-<day>.json` in that repo
+(one folder per account, created automatically on first upload)
 on a separate, longer timer than local saves (5 minutes by default).
 Local saves stay frequent for crash safety; uploads are deliberately
 less frequent since every upload creates a commit, and the data is only
