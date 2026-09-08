@@ -34,6 +34,8 @@ import java.util.Map;
  *        they can still be drawn on a map. Some templates (houses, some
  *        minigames) are themselves off the main map, which is why the
  *        flag is kept even though the coordinates are already translated.
+ *   b  = 1 when the event was recorded aboard a boat (Sailing). Omitted
+ *        otherwise.
  *
  * Waypoints deliberately store only x/y, not plane: a plane change is
  * already treated as a teleport by RouteTrackerPlugin and closes the walk
@@ -60,6 +62,7 @@ public class RouteEvent
 	public int[] hp; // null so Gson omits it for non-hp events
 	public Integer mx; // boxed so Gson omits it for non-hp events
 	public Integer i; // boxed so Gson omits it outside instances (see class doc)
+	public Integer b; // boxed so Gson omits it when not aboard a boat
 
 	public static RouteEvent walk(int[] from, int[] to, int[] waypoints,
 		int[] runStates, long start, long end)

@@ -89,6 +89,10 @@ public class RouteTrackerPlugin extends Plugin
 	// a scene change and therefore a teleport, which closes the segment,
 	// so it cannot change mid-segment.
 	private boolean walkSegmentInstance = false;
+	// Same idea for being aboard a boat (Sailing). Boarding and
+	// disembarking both move the player between world views, which shows
+	// up as a coordinate jump and closes the segment.
+	private boolean walkSegmentBoat = false;
 
 	// Intermediate turn points for the walk segment currently in progress,
 	// stored flat as x,y,x,y,... - see recordMovement() for why only turns
@@ -261,7 +265,8 @@ public class RouteTrackerPlugin extends Plugin
 
 		WorldPoint current = playerLocation(localPlayer);
 		boolean instNow = inInstance();
-		checkBank(current, instNow, now);
+		boolean boatNow = onBoat(localPlayer);
+		checkBank(current, instNow, boatNow, now);
 
 		if (lastTile == null)
 		{
@@ -269,6 +274,7 @@ public class RouteTrackerPlugin extends Plugin
 			walkSegmentStart = current;
 			walkSegmentStartTime = now;
 			walkSegmentInstance = instNow;
+			walkSegmentBoat = boatNow;
 			idleTicks = 0;
 			resetWaypoints();
 		}
@@ -280,11 +286,12 @@ public class RouteTrackerPlugin extends Plugin
 			{
 				closeWalkSegmentIfAny();
 				String label = TeleportLookup.lookup(current.getX(), current.getY(), current.getPlane());
-				activeSession.events.add(tagInstance(
-					RouteEvent.teleport(toArr(lastTile), toArr(current), label, now), instNow));
+				activeSession.events.add(tag(
+					RouteEvent.teleport(toArr(lastTile), toArr(current), label, now), instNow, boatNow));
 				walkSegmentStart = current;
 				walkSegmentStartTime = now;
 				walkSegmentInstance = instNow;
+				walkSegmentBoat = boatNow;
 				resetWaypoints();
 			}
 			else
@@ -386,9 +393,9 @@ public class RouteTrackerPlugin extends Plugin
 		}
 		pendingHpSamples.clear();
 
-		activeSession.events.add(tagInstance(RouteEvent.hp(
+		activeSession.events.add(tagHere(RouteEvent.hp(
 			at, client.getRealSkillLevel(Skill.HITPOINTS),
-			samples, pendingHpStart, pendingHpLast), inInstance()));
+			samples, pendingHpStart, pendingHpLast)));
 	}
 
 	/**
@@ -458,24 +465,36 @@ public class RouteTrackerPlugin extends Plugin
 		return client.getVarpValue(VarPlayerID.OPTION_RUN) == 1 ? 1 : 0;
 	}
 
-	private void checkBank(WorldPoint current, boolean inst, long now)
+	private void checkBank(WorldPoint current, boolean inst, boolean boat, long now)
 	{
 		boolean bankOpenNow = client.getWidget(InterfaceID.Bankmain.UNIVERSE) != null;
 		if (bankOpenNow && !bankWasOpen)
 		{
-			activeSession.events.add(tagInstance(RouteEvent.bank(toArr(current), now), inst));
+			activeSession.events.add(tag(RouteEvent.bank(toArr(current), now), inst, boat));
 		}
 		bankWasOpen = bankOpenNow;
 	}
 
 	/**
-	 * The player's tile, translated out of instance space when inside an
-	 * instance. RuneLite's fromLocalInstance returns the plain world
-	 * location when not in an instance, so this is safe to use always.
+	 * The player's tile. Inside an instance this is translated to the
+	 * instance's template coordinates (where that piece of map lives in
+	 * the real world) so it can still be drawn. Everywhere else it is the
+	 * plain world location, exactly as recorded before instance support
+	 * was added - deliberately not routed through fromLocalInstance, whose
+	 * non-instance path resolves against the top-level world view and so
+	 * might differ from getWorldLocation() while aboard a boat.
 	 */
 	private WorldPoint playerLocation(Player localPlayer)
 	{
-		return WorldPoint.fromLocalInstance(client, localPlayer.getLocalLocation());
+		if (inInstance())
+		{
+			WorldPoint template = WorldPoint.fromLocalInstance(client, localPlayer.getLocalLocation());
+			if (template != null)
+			{
+				return template;
+			}
+		}
+		return localPlayer.getWorldLocation();
 	}
 
 	private boolean inInstance()
@@ -484,9 +503,20 @@ public class RouteTrackerPlugin extends Plugin
 		return wv != null && wv.isInstance();
 	}
 
-	private static RouteEvent tagInstance(RouteEvent ev, boolean inst)
+	/**
+	 * Aboard a boat, the player belongs to the boat's own world view
+	 * rather than the top-level one.
+	 */
+	private static boolean onBoat(Player localPlayer)
+	{
+		WorldView wv = localPlayer.getWorldView();
+		return wv != null && !wv.isTopLevel();
+	}
+
+	private static RouteEvent tag(RouteEvent ev, boolean inst, boolean boat)
 	{
 		ev.i = inst ? 1 : null;
+		ev.b = boat ? 1 : null;
 		return ev;
 	}
 
@@ -499,14 +529,16 @@ public class RouteTrackerPlugin extends Plugin
 			// into the event - see RouteEvent.walk for how a constant state
 			// across the whole segment collapses to a single value.
 			walkRunStates.add(currentRunState());
-			activeSession.events.add(tagInstance(RouteEvent.walk(
+			activeSession.events.add(tag(RouteEvent.walk(
 				toArr(walkSegmentStart), toArr(lastTile), waypointsToArr(),
 				runStatesToArr(), walkSegmentStartTime, Instant.now().getEpochSecond()),
-				walkSegmentInstance));
+				walkSegmentInstance, walkSegmentBoat));
 		}
 		walkSegmentStart = lastTile;
 		walkSegmentStartTime = Instant.now().getEpochSecond();
 		walkSegmentInstance = inInstance();
+		Player lp = client.getLocalPlayer();
+		walkSegmentBoat = lp != null && onBoat(lp);
 		resetWaypoints();
 	}
 
@@ -560,8 +592,7 @@ public class RouteTrackerPlugin extends Plugin
 		pendingXpGains.forEach((skill, amount) -> gains.put(skill.getName(), amount));
 		pendingXpGains.clear();
 
-		activeSession.events.add(tagInstance(
-			RouteEvent.xp(at, gains, Instant.now().getEpochSecond()), inInstance()));
+		activeSession.events.add(tagHere(RouteEvent.xp(at, gains, Instant.now().getEpochSecond())));
 	}
 
 	/**
@@ -570,6 +601,13 @@ public class RouteTrackerPlugin extends Plugin
 	 * logout flush runs, and without the fallback everything accumulated
 	 * since the previous save would be silently dropped.
 	 */
+	/** Tags an event with the instance/boat state of wherever the player is right now. */
+	private RouteEvent tagHere(RouteEvent ev)
+	{
+		Player lp = client.getLocalPlayer();
+		return tag(ev, inInstance(), lp != null && onBoat(lp));
+	}
+
 	private int[] currentPositionOrLastKnown()
 	{
 		Player localPlayer = client.getLocalPlayer();
