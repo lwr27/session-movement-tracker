@@ -842,7 +842,7 @@ public class RouteTrackerPlugin extends Plugin
 
 		byte[] contentBytes = Files.readAllBytes(file.toPath());
 		String base64Content = Base64.getEncoder().encodeToString(contentBytes);
-		String path = GITHUB_UPLOAD_PATH_PREFIX + file.getName();
+		String path = GITHUB_UPLOAD_PATH_PREFIX + uploadRelativePath(file.getName());
 		String apiUrl = "https://api.github.com/repos/" + repo + "/contents/" + path;
 
 		// GitHub's Contents API requires the CURRENT file's sha to update an
@@ -878,6 +878,29 @@ public class RouteTrackerPlugin extends Plugin
 				log.debug("Uploaded {} to {}", file.getName(), apiUrl);
 			}
 		}
+	}
+
+	/**
+	 * Remote layout is one folder per account: &lt;hash&gt;/&lt;yyyy-MM-dd&gt;.json.
+	 * The hash is taken from the local filename rather than asked of the
+	 * client, because this runs on a background thread and may run during
+	 * the logout flush, when client state is no longer reliable. GitHub's
+	 * Contents API creates the folder on first upload, so nothing needs
+	 * setting up on the repo side.
+	 */
+	private static String uploadRelativePath(String localName)
+	{
+		// Local name is <hash>-yyyy-MM-dd.json; the hash itself can be
+		// negative, so split at the dash that precedes the date part
+		// rather than the first dash in the string.
+		int dateLen = "yyyy-MM-dd.json".length();
+		if (localName.length() > dateLen + 1 && localName.charAt(localName.length() - dateLen - 1) == '-')
+		{
+			String hash = localName.substring(0, localName.length() - dateLen - 1);
+			String dayFile = localName.substring(localName.length() - dateLen);
+			return hash + "/" + dayFile;
+		}
+		return localName; // unexpected name shape - fall back to flat layout
 	}
 
 	/**
