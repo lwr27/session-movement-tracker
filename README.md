@@ -3,8 +3,8 @@
 A RuneLite plugin that records a session-by-session timeline of your
 character's movement, including walking, running, teleports, and bank
 visits, all saved to a local file on your own computer. Optionally
-records XP gains too, so a stationary training session isn't left
-completely empty.
+records XP gains and hitpoints changes too, so a stationary training
+session isn't left completely empty.
 
 It was built to power a companion web map (a personal OSRS XP/activity
 tracker) that replays your sessions as an animated route on an
@@ -35,6 +35,13 @@ chronological list of events:
   tagged with your position at the time. This is the only thing
   recorded at all during stationary training (mining, fishing, AFK
   combat, etc.), where there's no movement to track otherwise.
+- **Hitpoints changes** - optional, on by default. Checks your current
+  hitpoints every game tick and notes any change, then bundles all the
+  changes since the last local save into a single event with your max
+  hitpoints at the time. Only changes are stored, so a session spent at
+  full health writes nothing at all; data is only added while taking
+  damage, healing, or regenerating back to full. Logging in below full
+  health counts as a change, so that starting value is captured too.
 
 Sessions that are interrupted by a crash or force-close and resumed
 within a few minutes are merged back into the same session rather than
@@ -85,6 +92,7 @@ repo you control and trust.
 | Teleport detection threshold | 4 tiles | Minimum distance between two ticks to count as a teleport rather than walking/running |
 | Local save interval | 60 seconds | How often the current session is written to disk |
 | Track XP gains | On | Records per-skill XP gained since the last save, tagged with position |
+| Track hitpoints | On | Records changes to current hitpoints since the last save. Nothing is written while at full health |
 | Keep local data for (months) | 3 | Local route data older than this is deleted automatically. Set to 0 to keep forever |
 | GitHub repo (optional) | *blank* | Destination repo for uploads, `owner/repo` |
 | GitHub token (optional) | *blank* | Personal Access Token for the repo above (masked in the config UI) |
@@ -103,7 +111,8 @@ Each daily file is a JSON array of sessions:
     "events": [
       { "ty": "tp", "f": [2757, 3479, 0], "t": [2654, 2655, 0], "s": 1784894405, "lbl": "Pest Control" },
       { "ty": "walk", "f": [2654, 2655, 0], "t": [2653, 2654, 0], "rAll": 1, "s": 1784894407, "e": 1784894409 },
-      { "ty": "xp", "t": [2653, 2654, 0], "s": 1784894410, "xp": { "Woodcutting": 875 } }
+      { "ty": "xp", "t": [2653, 2654, 0], "s": 1784894410, "xp": { "Woodcutting": 875 } },
+      { "ty": "hp", "t": [2653, 2654, 0], "mx": 99, "hp": [0, 91, 2, 84, 5, 99], "s": 1784894412, "e": 1784894417 }
     ]
   }
 ]
@@ -117,11 +126,17 @@ present if it changed within the segment), `rAll` (run state for the
 whole segment, used instead of `r` when it never changed), `s`/`e`
 (start/end time, epoch seconds), `lbl` (matched teleport label, if
 any), `xp` (per-skill XP gained since the previous xp event, `xp`
-events only).
+events only), `hp` (hitpoints changes as flat `[offset, value, ...]`
+pairs, where each offset is seconds after `s`, `hp` events only), `mx`
+(max hitpoints at the time, `hp` events only). In the example above,
+the player was on 91 hitpoints at `s`, dropped to 84 two seconds later,
+and ate back to 99 at five seconds. A value above `mx` is possible
+after a Saradomin brew or similar overheal.
 
 ## Privacy
 
 This plugin only ever records your own character's tile position,
-movement, bank-open events, and (if enabled) your own XP gains, all
-timestamped. It does not read chat, inventory contents, other players,
-or anything beyond location, run state, and the event types above.
+movement, bank-open events, and (if enabled) your own XP gains and
+hitpoints, all timestamped. It does not read chat, inventory contents,
+other players, or anything beyond location, run state, and the event
+types above.
