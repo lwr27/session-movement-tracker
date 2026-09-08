@@ -17,8 +17,10 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ScheduledExecutorService;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
@@ -913,8 +915,6 @@ public class RouteTrackerPlugin extends Plugin
 			return; // belt-and-braces check - this method makes an OkHttp call itself
 		}
 
-		byte[] contentBytes = Files.readAllBytes(file.toPath());
-		String base64Content = Base64.getEncoder().encodeToString(contentBytes);
 		String path = GITHUB_UPLOAD_PATH_PREFIX + uploadRelativePath(file.getName());
 		String apiUrl = "https://api.github.com/repos/" + repo + "/contents/" + path;
 
@@ -922,7 +922,23 @@ public class RouteTrackerPlugin extends Plugin
 		// existing file (and rejects the request without one, to prevent
 		// accidentally clobbering someone else's concurrent edit) - omitted
 		// entirely for a brand new file, which the 404 case below signals.
-		String existingSha = fetchExistingSha(apiUrl, token);
+		// The same call returns the remote file's content, which is merged
+		// with the local copy so that playing the same account from two
+		// computers on one day doesn't have the second machine's upload
+		// wipe out the first's sessions.
+		RemoteFile remote = fetchRemoteFile(apiUrl, token);
+		String existingSha = remote != null ? remote.sha : null;
+
+		byte[] contentBytes = Files.readAllBytes(file.toPath());
+		if (remote != null && remote.content != null)
+		{
+			byte[] merged = mergeSessionFiles(remote.content, contentBytes);
+			if (merged != null)
+			{
+				contentBytes = merged;
+			}
+		}
+		String base64Content = Base64.getEncoder().encodeToString(contentBytes);
 
 		JsonObject body = new JsonObject();
 		body.addProperty("message", "Update route data: " + file.getName());
@@ -976,11 +992,71 @@ public class RouteTrackerPlugin extends Plugin
 		return localName; // unexpected name shape - fall back to flat layout
 	}
 
+	private static final class RemoteFile
+	{
+		final String sha;
+		final byte[] content;
+
+		RemoteFile(String sha, byte[] content)
+		{
+			this.sha = sha;
+			this.content = content;
+		}
+	}
+
 	/**
-	 * Fetches the current sha of the remote file, or null if it doesn't
-	 * exist there yet (a fresh upload, e.g. a new month's file).
+	 * Merges the remote copy of a day file with the local one: sessions
+	 * are keyed by id, the local version wins for any id present in both
+	 * (it's the live in-memory one), and anything only on the remote side
+	 * - sessions recorded on another computer - is kept. Result is sorted
+	 * by session start. Returns null if the remote file can't be parsed,
+	 * in which case the caller uploads the local file as-is.
 	 */
-	private String fetchExistingSha(String apiUrl, String token)
+	private byte[] mergeSessionFiles(byte[] remoteBytes, byte[] localBytes)
+	{
+		try
+		{
+			Type listType = new TypeToken<List<Session>>() {}.getType();
+			List<Session> remote = gson.fromJson(new String(remoteBytes, StandardCharsets.UTF_8), listType);
+			List<Session> local = gson.fromJson(new String(localBytes, StandardCharsets.UTF_8), listType);
+			if (remote == null || remote.isEmpty())
+			{
+				return null;
+			}
+			Map<String, Session> byId = new LinkedHashMap<>();
+			for (Session s : remote)
+			{
+				if (s != null && s.id != null)
+				{
+					byId.put(s.id, s);
+				}
+			}
+			if (local != null)
+			{
+				for (Session s : local)
+				{
+					if (s != null && s.id != null)
+					{
+						byId.put(s.id, s);
+					}
+				}
+			}
+			List<Session> merged = new ArrayList<>(byId.values());
+			merged.sort((a, b) -> Long.compare(a.start, b.start));
+			return gson.toJson(merged, listType).getBytes(StandardCharsets.UTF_8);
+		}
+		catch (Exception e)
+		{
+			log.debug("Could not merge remote route file, uploading local copy as-is", e);
+			return null;
+		}
+	}
+
+	/**
+	 * Fetches the current sha and content of the remote file, or null if
+	 * it doesn't exist there yet (a fresh upload, e.g. a new day's file).
+	 */
+	private RemoteFile fetchRemoteFile(String apiUrl, String token)
 	{
 		if (!config.enableGithubUpload())
 		{
@@ -1006,7 +1082,22 @@ public class RouteTrackerPlugin extends Plugin
 				return null;
 			}
 			JsonObject obj = new JsonParser().parse(response.body().string()).getAsJsonObject();
-			return obj.has("sha") ? obj.get("sha").getAsString() : null;
+			String sha = obj.has("sha") ? obj.get("sha").getAsString() : null;
+			byte[] content = null;
+			// Content comes back base64 with embedded newlines; the MIME
+			// decoder tolerates those where the basic one rejects them.
+			if (obj.has("content") && !obj.get("content").isJsonNull())
+			{
+				try
+				{
+					content = Base64.getMimeDecoder().decode(obj.get("content").getAsString());
+				}
+				catch (IllegalArgumentException e)
+				{
+					log.debug("Could not decode remote route file content", e);
+				}
+			}
+			return sha != null ? new RemoteFile(sha, content) : null;
 		}
 		catch (Exception e)
 		{
