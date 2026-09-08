@@ -30,11 +30,14 @@ chronological list of events:
   of known teleport locations and labelled (e.g. "Lumbridge Home
   Teleport").
 - **Bank visits** - the moment a bank interface is opened.
-- **XP gains** - optional, on by default. Batches up whatever XP was
-  gained in each skill since the last local save into a single event,
-  tagged with your position at the time. This is the only thing
-  recorded at all during stationary training (mining, fishing, AFK
-  combat, etc.), where there's no movement to track otherwise.
+- **XP gains** - optional, on by default. Every XP drop is noted the
+  second it lands, and all drops since the last local save are packed
+  into one event (about 10 bytes per drop), tagged with your position.
+  This is the only thing recorded at all during stationary training
+  (mining, fishing, AFK combat, etc.), where there's no movement to
+  track otherwise. Pending XP and hitpoints changes are also written
+  out just before a teleport, so they stay attributed to where they
+  actually happened.
 - **Hitpoints changes** - optional, on by default. Checks your current
   hitpoints every game tick and notes any change, then bundles all the
   changes since the last local save into a single event with your max
@@ -67,7 +70,7 @@ One file per account per day, inside a folder per month. Nothing
 leaves your computer unless you explicitly opt in (see below).
 
 Local data is deleted automatically after a configurable number of
-months (3 by default, set to 0 to keep everything forever). This only
+months (1 by default, set to 0 to keep everything forever). This only
 ever affects files on your own computer; anything already uploaded to
 GitHub is never touched by this cleanup.
 
@@ -106,7 +109,7 @@ repo you control and trust.
 | Local save interval | 60 seconds | How often the current session is written to disk |
 | Track XP gains | On | Records per-skill XP gained since the last save, tagged with position |
 | Track hitpoints | On | Records changes to current hitpoints since the last save. Nothing is written while at full health |
-| Keep local data for (months) | 3 | Local route data older than this is deleted automatically. Set to 0 to keep forever |
+| Keep local data for (months) | 1 | Local route data older than this is deleted automatically. Set to 0 to keep forever |
 | GitHub repo (optional) | *blank* | Destination repo for uploads, `owner/repo` |
 | GitHub token (optional) | *blank* | Personal Access Token for the repo above (masked in the config UI) |
 | GitHub upload interval | 300 seconds | How often data is uploaded, separate from the local save interval |
@@ -124,7 +127,7 @@ Each daily file is a JSON array of sessions:
     "events": [
       { "ty": "tp", "f": [2757, 3479, 0], "t": [2654, 2655, 0], "s": 1784894405, "lbl": "Pest Control" },
       { "ty": "walk", "f": [2654, 2655, 0], "t": [2653, 2654, 0], "rAll": 1, "s": 1784894407, "e": 1784894409 },
-      { "ty": "xp", "t": [2653, 2654, 0], "s": 1784894410, "xp": { "Woodcutting": 875 } },
+      { "ty": "xp", "t": [2653, 2654, 0], "s": 1784894410, "e": 1784894418, "sk": ["Woodcutting"], "d": [0, 0, 25, 4, 0, 25, 8, 0, 25] },
       { "ty": "hp", "t": [2653, 2654, 0], "mx": 99, "hp": [0, 91, 2, 84, 5, 99], "s": 1784894412, "e": 1784894417 }
     ]
   }
@@ -138,8 +141,11 @@ actually turned or run was toggled), `r` (run state per point, only
 present if it changed within the segment), `rAll` (run state for the
 whole segment, used instead of `r` when it never changed), `s`/`e`
 (start/end time, epoch seconds), `lbl` (matched teleport label, if
-any), `xp` (per-skill XP gained since the previous xp event, `xp`
-events only), `hp` (hitpoints changes as flat `[offset, value, ...]`
+any), `sk`/`d` (XP drops, `xp` events only: `sk` is the list of skill names
+used by this event and `d` is flat `[offset, skillIndex, amount, ...]`
+triples, offset in seconds after `s`; the example above is three
+Woodcutting drops of 25 at 0s, 4s and 8s. Files written by version 1.1
+carry an `xp` map of per-skill totals instead), `hp` (hitpoints changes as flat `[offset, value, ...]`
 pairs, where each offset is seconds after `s`, `hp` events only), `mx`
 (max hitpoints at the time, `hp` events only). In the example above,
 the player was on 91 hitpoints at `s`, dropped to 84 two seconds later,
