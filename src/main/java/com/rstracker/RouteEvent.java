@@ -26,6 +26,14 @@ import java.util.Map;
  *        any unchanging) health produces no hp event at all
  *   mx = max hitpoints at the time of the event - hp only, so the site can
  *        show the values as a fraction of the bar without a hiscores lookup
+ *   i  = 1 when the event was recorded inside an instance (a raid, boss
+ *        room, player-owned house, etc). Omitted otherwise. Coordinates on
+ *        instanced events are the instance's TEMPLATE coordinates - where
+ *        that piece of map lives in the real world - rather than the
+ *        throwaway coordinates the instance itself was allocated at, so
+ *        they can still be drawn on a map. Some templates (houses, some
+ *        minigames) are themselves off the main map, which is why the
+ *        flag is kept even though the coordinates are already translated.
  *
  * Waypoints deliberately store only x/y, not plane: a plane change is
  * already treated as a teleport by RouteTrackerPlugin and closes the walk
@@ -51,6 +59,7 @@ public class RouteEvent
 	public Map<String, Integer> xp; // null so Gson omits it for non-xp events
 	public int[] hp; // null so Gson omits it for non-hp events
 	public Integer mx; // boxed so Gson omits it for non-hp events
+	public Integer i; // boxed so Gson omits it outside instances (see class doc)
 
 	public static RouteEvent walk(int[] from, int[] to, int[] waypoints,
 		int[] runStates, long start, long end)

@@ -26,6 +26,7 @@ import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.Player;
 import net.runelite.api.Skill;
+import net.runelite.api.WorldView;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
@@ -83,6 +84,11 @@ public class RouteTrackerPlugin extends Plugin
 	private long walkSegmentStartTime;
 	private int idleTicks = 0;
 	private boolean bankWasOpen = false;
+	// Whether the walk segment in progress is inside an instance. Captured
+	// at segment start; leaving or entering an instance always shows up as
+	// a scene change and therefore a teleport, which closes the segment,
+	// so it cannot change mid-segment.
+	private boolean walkSegmentInstance = false;
 
 	// Intermediate turn points for the walk segment currently in progress,
 	// stored flat as x,y,x,y,... - see recordMovement() for why only turns
@@ -253,14 +259,16 @@ public class RouteTrackerPlugin extends Plugin
 			activeSession = resumeOrStartSession(now);
 		}
 
-		WorldPoint current = localPlayer.getWorldLocation();
-		checkBank(current, now);
+		WorldPoint current = playerLocation(localPlayer);
+		boolean instNow = inInstance();
+		checkBank(current, instNow, now);
 
 		if (lastTile == null)
 		{
 			lastTile = current;
 			walkSegmentStart = current;
 			walkSegmentStartTime = now;
+			walkSegmentInstance = instNow;
 			idleTicks = 0;
 			resetWaypoints();
 		}
@@ -272,9 +280,11 @@ public class RouteTrackerPlugin extends Plugin
 			{
 				closeWalkSegmentIfAny();
 				String label = TeleportLookup.lookup(current.getX(), current.getY(), current.getPlane());
-				activeSession.events.add(RouteEvent.teleport(toArr(lastTile), toArr(current), label, now));
+				activeSession.events.add(tagInstance(
+					RouteEvent.teleport(toArr(lastTile), toArr(current), label, now), instNow));
 				walkSegmentStart = current;
 				walkSegmentStartTime = now;
+				walkSegmentInstance = instNow;
 				resetWaypoints();
 			}
 			else
@@ -376,9 +386,9 @@ public class RouteTrackerPlugin extends Plugin
 		}
 		pendingHpSamples.clear();
 
-		activeSession.events.add(RouteEvent.hp(
+		activeSession.events.add(tagInstance(RouteEvent.hp(
 			at, client.getRealSkillLevel(Skill.HITPOINTS),
-			samples, pendingHpStart, pendingHpLast));
+			samples, pendingHpStart, pendingHpLast), inInstance()));
 	}
 
 	/**
@@ -448,14 +458,36 @@ public class RouteTrackerPlugin extends Plugin
 		return client.getVarpValue(VarPlayerID.OPTION_RUN) == 1 ? 1 : 0;
 	}
 
-	private void checkBank(WorldPoint current, long now)
+	private void checkBank(WorldPoint current, boolean inst, long now)
 	{
 		boolean bankOpenNow = client.getWidget(InterfaceID.Bankmain.UNIVERSE) != null;
 		if (bankOpenNow && !bankWasOpen)
 		{
-			activeSession.events.add(RouteEvent.bank(toArr(current), now));
+			activeSession.events.add(tagInstance(RouteEvent.bank(toArr(current), now), inst));
 		}
 		bankWasOpen = bankOpenNow;
+	}
+
+	/**
+	 * The player's tile, translated out of instance space when inside an
+	 * instance. RuneLite's fromLocalInstance returns the plain world
+	 * location when not in an instance, so this is safe to use always.
+	 */
+	private WorldPoint playerLocation(Player localPlayer)
+	{
+		return WorldPoint.fromLocalInstance(client, localPlayer.getLocalLocation());
+	}
+
+	private boolean inInstance()
+	{
+		WorldView wv = client.getTopLevelWorldView();
+		return wv != null && wv.isInstance();
+	}
+
+	private static RouteEvent tagInstance(RouteEvent ev, boolean inst)
+	{
+		ev.i = inst ? 1 : null;
+		return ev;
 	}
 
 	private void closeWalkSegmentIfAny()
@@ -467,12 +499,14 @@ public class RouteTrackerPlugin extends Plugin
 			// into the event - see RouteEvent.walk for how a constant state
 			// across the whole segment collapses to a single value.
 			walkRunStates.add(currentRunState());
-			activeSession.events.add(RouteEvent.walk(
+			activeSession.events.add(tagInstance(RouteEvent.walk(
 				toArr(walkSegmentStart), toArr(lastTile), waypointsToArr(),
-				runStatesToArr(), walkSegmentStartTime, Instant.now().getEpochSecond()));
+				runStatesToArr(), walkSegmentStartTime, Instant.now().getEpochSecond()),
+				walkSegmentInstance));
 		}
 		walkSegmentStart = lastTile;
 		walkSegmentStartTime = Instant.now().getEpochSecond();
+		walkSegmentInstance = inInstance();
 		resetWaypoints();
 	}
 
@@ -526,7 +560,8 @@ public class RouteTrackerPlugin extends Plugin
 		pendingXpGains.forEach((skill, amount) -> gains.put(skill.getName(), amount));
 		pendingXpGains.clear();
 
-		activeSession.events.add(RouteEvent.xp(at, gains, Instant.now().getEpochSecond()));
+		activeSession.events.add(tagInstance(
+			RouteEvent.xp(at, gains, Instant.now().getEpochSecond()), inInstance()));
 	}
 
 	/**
@@ -538,9 +573,9 @@ public class RouteTrackerPlugin extends Plugin
 	private int[] currentPositionOrLastKnown()
 	{
 		Player localPlayer = client.getLocalPlayer();
-		if (localPlayer != null && localPlayer.getWorldLocation() != null)
+		if (localPlayer != null && localPlayer.getLocalLocation() != null)
 		{
-			return toArr(localPlayer.getWorldLocation());
+			return toArr(playerLocation(localPlayer));
 		}
 		return lastTile != null ? toArr(lastTile) : null;
 	}
