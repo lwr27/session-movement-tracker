@@ -49,6 +49,7 @@ where that piece of map lives in the real world, rather than the
 temporary coordinates the instance was allocated at. Events recorded
 inside an instance are additionally flagged with `"i": 1`, since some
 templates (houses in particular) are themselves off the main map.
+Events recorded while aboard a boat are flagged with `"b": 1`.
 
 Sessions that are interrupted by a crash or force-close and resumed
 within a few minutes are merged back into the same session rather than
@@ -140,7 +141,8 @@ pairs, where each offset is seconds after `s`, `hp` events only), `mx`
 the player was on 91 hitpoints at `s`, dropped to 84 two seconds later,
 and ate back to 99 at five seconds. A value above `mx` is possible
 after a Saradomin brew or similar overheal. `i` (present and set to 1
-on any event recorded inside an instance, see above).
+on any event recorded inside an instance, see above), `b` (present and
+set to 1 on any event recorded aboard a boat).
 
 ## Privacy
 
