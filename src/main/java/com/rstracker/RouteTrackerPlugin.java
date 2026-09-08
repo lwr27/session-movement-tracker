@@ -16,7 +16,6 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.EnumMap;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -124,7 +123,19 @@ public class RouteTrackerPlugin extends Plugin
 	// changed since the previous one rather than absolute totals. Null
 	// until the first StatChanged has been seen for that skill.
 	private final Map<Skill, Integer> lastXpBySkill = new EnumMap<>(Skill.class);
-	private final Map<Skill, Integer> pendingXpGains = new EnumMap<>(Skill.class);
+	// Pending XP drops since the last flush, stored flat as
+	// [offsetSeconds, skillIndex, amount, ...] where skillIndex points into
+	// pendingXpSkills (the per-event legend of skill names). Emptied by
+	// captureXpDeltas() on every flush.
+	private final List<Integer> pendingXpDrops = new ArrayList<>();
+	private final List<String> pendingXpSkills = new ArrayList<>();
+	private long pendingXpStart = 0;
+	private long pendingXpLast = 0;
+	// Last tile seen before a login-type state change wiped lastTile. Lets
+	// the first tick after a loading screen (boat trip, hop) record the
+	// jump as a teleport instead of silently starting a fresh walk from
+	// the new position.
+	private WorldPoint lastKnownTile = null;
 	// Hitpoints as of the last tick, or -1 before the first reading after
 	// login. Compared every tick so only actual changes get recorded.
 	private int lastHp = -1;
@@ -155,6 +166,9 @@ public class RouteTrackerPlugin extends Plugin
 	// reached in normal play - it just bounds the event if someone sets a
 	// very long save interval.
 	private static final int MAX_HP_SAMPLES_PER_FLUSH = 500;
+	// Hard ceiling on xp drops per flush cycle. Heavy combat is around
+	// 50 drops a minute, so the default 60s save never gets near this.
+	private static final int MAX_XP_DROPS_PER_FLUSH = 2000;
 	private static final String GITHUB_UPLOAD_PATH_PREFIX = "docs/route-data/";
 
 	private static final DateTimeFormatter MONTH_FMT =
@@ -181,8 +195,9 @@ public class RouteTrackerPlugin extends Plugin
 		ticksSinceFlush = 0;
 		ticksSinceUpload = 0;
 		lastXpBySkill.clear();
-		pendingXpGains.clear();
+		resetXpTracking();
 		resetHpTracking();
+		lastKnownTile = null;
 		resetWaypoints();
 		pruneOldLocalData();
 	}
@@ -204,8 +219,9 @@ public class RouteTrackerPlugin extends Plugin
 			closeSessionCleanly();
 			flushToDisk(true);
 			lastXpBySkill.clear();
-			pendingXpGains.clear();
+			resetXpTracking();
 			resetHpTracking();
+			lastKnownTile = lastTile;
 			lastTile = null;
 			walkSegmentStart = null;
 			idleTicks = 0;
@@ -215,10 +231,10 @@ public class RouteTrackerPlugin extends Plugin
 	}
 
 	/**
-	 * Accumulates XP gains between flushes. RuneLite fires StatChanged very
-	 * frequently (potentially several times a second while training), so
-	 * nothing is written here - gains are just totalled up in memory and
-	 * emitted as a single event per flush cycle by captureXpDeltas().
+	 * Records each XP drop (skill, amount, second it landed) in memory.
+	 * Nothing is written here; captureXpDeltas() packs everything since
+	 * the last flush into a single event, so file writes stay per save
+	 * while playback can still show drops at the moment they happened.
 	 */
 	@Subscribe
 	public void onStatChanged(StatChanged event)
@@ -238,10 +254,34 @@ public class RouteTrackerPlugin extends Plugin
 			return;
 		}
 		int delta = xp - previous;
-		if (delta > 0)
+		if (delta <= 0 || pendingXpDrops.size() / 3 >= MAX_XP_DROPS_PER_FLUSH)
 		{
-			pendingXpGains.merge(skill, delta, Integer::sum);
+			return;
 		}
+		long now = Instant.now().getEpochSecond();
+		if (pendingXpDrops.isEmpty())
+		{
+			pendingXpStart = now;
+		}
+		String name = skill.getName();
+		int idx = pendingXpSkills.indexOf(name);
+		if (idx < 0)
+		{
+			pendingXpSkills.add(name);
+			idx = pendingXpSkills.size() - 1;
+		}
+		pendingXpDrops.add((int) (now - pendingXpStart));
+		pendingXpDrops.add(idx);
+		pendingXpDrops.add(delta);
+		pendingXpLast = now;
+	}
+
+	private void resetXpTracking()
+	{
+		pendingXpDrops.clear();
+		pendingXpSkills.clear();
+		pendingXpStart = 0;
+		pendingXpLast = 0;
 	}
 
 	@Subscribe
@@ -272,6 +312,19 @@ public class RouteTrackerPlugin extends Plugin
 
 		if (lastTile == null)
 		{
+			// Coming back from a loading screen inside the same session
+			// (boat trip, world hop): if the position moved while we
+			// weren't looking, that's a teleport the plugin would
+			// otherwise never record.
+			if (lastKnownTile != null && !activeSession.events.isEmpty()
+				&& (current.getPlane() != lastKnownTile.getPlane()
+					|| current.distanceTo(lastKnownTile) > config.teleportTileThreshold()))
+			{
+				String label = TeleportLookup.lookup(current.getX(), current.getY(), current.getPlane());
+				activeSession.events.add(tag(
+					RouteEvent.teleport(toArr(lastKnownTile), toArr(current), label, now), instNow, boatNow));
+			}
+			lastKnownTile = null;
 			lastTile = current;
 			walkSegmentStart = current;
 			walkSegmentStartTime = now;
@@ -287,6 +340,12 @@ public class RouteTrackerPlugin extends Plugin
 			if (current.getPlane() != lastTile.getPlane() || distance > config.teleportTileThreshold())
 			{
 				closeWalkSegmentIfAny();
+				// Write out anything earned at the origin before the jump,
+				// tagged with the origin, so XP and HP changes belong to
+				// where they happened rather than wherever the next save
+				// finds the player.
+				captureXpDeltas(toArr(lastTile), walkSegmentInstance, walkSegmentBoat);
+				captureHpChanges(toArr(lastTile), walkSegmentInstance, walkSegmentBoat);
 				String label = TeleportLookup.lookup(current.getX(), current.getY(), current.getPlane());
 				activeSession.events.add(tag(
 					RouteEvent.teleport(toArr(lastTile), toArr(current), label, now), instNow, boatNow));
@@ -378,12 +437,14 @@ public class RouteTrackerPlugin extends Plugin
 	 */
 	private void captureHpChanges()
 	{
-		if (!config.trackHealth() || pendingHpSamples.isEmpty() || activeSession == null)
-		{
-			return;
-		}
 		int[] at = currentPositionOrLastKnown();
-		if (at == null)
+		Player lp = client.getLocalPlayer();
+		captureHpChanges(at, inInstance(), lp != null && onBoat(lp));
+	}
+
+	private void captureHpChanges(int[] at, boolean inst, boolean boat)
+	{
+		if (!config.trackHealth() || pendingHpSamples.isEmpty() || activeSession == null || at == null)
 		{
 			return;
 		}
@@ -395,9 +456,9 @@ public class RouteTrackerPlugin extends Plugin
 		}
 		pendingHpSamples.clear();
 
-		activeSession.events.add(tagHere(RouteEvent.hp(
+		activeSession.events.add(tag(RouteEvent.hp(
 			at, client.getRealSkillLevel(Skill.HITPOINTS),
-			samples, pendingHpStart, pendingHpLast)));
+			samples, pendingHpStart, pendingHpLast), inst, boat));
 	}
 
 	/**
@@ -580,21 +641,28 @@ public class RouteTrackerPlugin extends Plugin
 	 */
 	private void captureXpDeltas()
 	{
-		if (!config.trackXpGains() || pendingXpGains.isEmpty() || activeSession == null)
-		{
-			return;
-		}
 		int[] at = currentPositionOrLastKnown();
-		if (at == null)
+		Player lp = client.getLocalPlayer();
+		captureXpDeltas(at, inInstance(), lp != null && onBoat(lp));
+	}
+
+	private void captureXpDeltas(int[] at, boolean inst, boolean boat)
+	{
+		if (!config.trackXpGains() || pendingXpDrops.isEmpty() || activeSession == null || at == null)
 		{
 			return;
 		}
 
-		Map<String, Integer> gains = new HashMap<>();
-		pendingXpGains.forEach((skill, amount) -> gains.put(skill.getName(), amount));
-		pendingXpGains.clear();
+		int[] drops = new int[pendingXpDrops.size()];
+		for (int i = 0; i < drops.length; i++)
+		{
+			drops[i] = pendingXpDrops.get(i);
+		}
+		String[] skills = pendingXpSkills.toArray(new String[0]);
+		long start = pendingXpStart, end = pendingXpLast;
+		resetXpTracking();
 
-		activeSession.events.add(tagHere(RouteEvent.xp(at, gains, Instant.now().getEpochSecond())));
+		activeSession.events.add(tag(RouteEvent.xp(at, skills, drops, start, end), inst, boat));
 	}
 
 	/**
@@ -603,13 +671,6 @@ public class RouteTrackerPlugin extends Plugin
 	 * logout flush runs, and without the fallback everything accumulated
 	 * since the previous save would be silently dropped.
 	 */
-	/** Tags an event with the instance/boat state of wherever the player is right now. */
-	private RouteEvent tagHere(RouteEvent ev)
-	{
-		Player lp = client.getLocalPlayer();
-		return tag(ev, inInstance(), lp != null && onBoat(lp));
-	}
-
 	private int[] currentPositionOrLastKnown()
 	{
 		Player localPlayer = client.getLocalPlayer();

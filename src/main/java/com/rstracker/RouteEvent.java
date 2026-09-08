@@ -19,7 +19,13 @@ import java.util.Map;
  *   s  = start time (epoch seconds)
  *   e  = end time (epoch seconds) - walk only
  *   lbl = teleport label, if matched against TeleportLookup - tp only
- *   xp = per-skill XP gained since the previous xp event - xp only
+ *   sk = legend of skill names for this event's drops - xp only
+ *   d  = XP drops, flat [dt1,skill1,amount1,dt2,skill2,amount2,...] - xp
+ *        only. dt is seconds after `s`, skill is an index into `sk`.
+ *        Each drop is recorded the second it lands; the event itself is
+ *        still written once per save, so files grow by roughly 10 bytes
+ *        per drop rather than an event per drop.
+ *        (Files written by 1.1 carry a per-skill `xp` total map instead.)
  *   hp = hitpoints changes, flat [dt1,v1,dt2,v2,...] - hp only. Each pair is
  *        an offset in seconds from `s` and the current hitpoints as of that
  *        moment. Only actual changes are stored, so a stretch at full (or
@@ -58,7 +64,9 @@ public class RouteEvent
 	public long s;
 	public Long e; // boxed so it's omitted from JSON when null (non-walk events)
 	public String lbl;
-	public Map<String, Integer> xp; // null so Gson omits it for non-xp events
+	public Map<String, Integer> xp; // 1.1 format: per-skill totals; null on newer events
+	public String[] sk; // null so Gson omits it for non-xp events
+	public int[] d; // null so Gson omits it for non-xp events
 	public int[] hp; // null so Gson omits it for non-hp events
 	public Integer mx; // boxed so Gson omits it for non-hp events
 	public Integer i; // boxed so Gson omits it outside instances (see class doc)
@@ -122,17 +130,20 @@ public class RouteEvent
 	}
 
 	/**
-	 * XP gained since the previous xp event, tagged with where the player
-	 * was when it was recorded. Batched once per flush cycle rather than
-	 * per XP drop - see RouteTrackerPlugin.captureXpDeltas().
+	 * Every XP drop since the previous xp event, each with the second it
+	 * landed relative to `s` (the first drop) and `e` (the last). Tagged
+	 * with the player's position at the time of writing - see
+	 * RouteTrackerPlugin.captureXpDeltas().
 	 */
-	public static RouteEvent xp(int[] at, Map<String, Integer> gains, long time)
+	public static RouteEvent xp(int[] at, String[] skills, int[] drops, long start, long end)
 	{
 		RouteEvent ev = new RouteEvent();
 		ev.ty = "xp";
 		ev.t = at;
-		ev.xp = gains;
-		ev.s = time;
+		ev.sk = skills;
+		ev.d = drops;
+		ev.s = start;
+		ev.e = end;
 		return ev;
 	}
 

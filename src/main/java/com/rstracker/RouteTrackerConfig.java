@@ -61,7 +61,7 @@ public interface RouteTrackerConfig extends Config
 	)
 	default int retentionMonths()
 	{
-		return 3;
+		return 1;
 	}
 
 	@ConfigItem(
