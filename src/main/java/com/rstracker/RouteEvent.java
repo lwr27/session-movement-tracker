@@ -4,7 +4,7 @@ import java.util.Map;
 
 /**
  * A single route event, using short field names to keep the JSON compact:
- *   ty = type ("walk" | "tp" | "bank" | "xp")
+ *   ty = type ("walk" | "tp" | "bank" | "xp" | "hp")
  *   f  = from [x,y,plane]
  *   t  = to [x,y,plane]
  *   w  = walk waypoints, flat [x1,y1,x2,y2,...] - walk only, omitted when
@@ -20,6 +20,12 @@ import java.util.Map;
  *   e  = end time (epoch seconds) - walk only
  *   lbl = teleport label, if matched against TeleportLookup - tp only
  *   xp = per-skill XP gained since the previous xp event - xp only
+ *   hp = hitpoints changes, flat [dt1,v1,dt2,v2,...] - hp only. Each pair is
+ *        an offset in seconds from `s` and the current hitpoints as of that
+ *        moment. Only actual changes are stored, so a stretch at full (or
+ *        any unchanging) health produces no hp event at all
+ *   mx = max hitpoints at the time of the event - hp only, so the site can
+ *        show the values as a fraction of the bar without a hiscores lookup
  *
  * Waypoints deliberately store only x/y, not plane: a plane change is
  * already treated as a teleport by RouteTrackerPlugin and closes the walk
@@ -43,6 +49,8 @@ public class RouteEvent
 	public Long e; // boxed so it's omitted from JSON when null (non-walk events)
 	public String lbl;
 	public Map<String, Integer> xp; // null so Gson omits it for non-xp events
+	public int[] hp; // null so Gson omits it for non-hp events
+	public Integer mx; // boxed so Gson omits it for non-hp events
 
 	public static RouteEvent walk(int[] from, int[] to, int[] waypoints,
 		int[] runStates, long start, long end)
@@ -113,6 +121,25 @@ public class RouteEvent
 		ev.t = at;
 		ev.xp = gains;
 		ev.s = time;
+		return ev;
+	}
+
+	/**
+	 * Hitpoints changes accumulated since the previous flush, tagged with
+	 * where the player was when they were written out. `s` is the time of
+	 * the first change in the batch and `e` the time of the last, so the
+	 * per-pair offsets in `samples` are relative to `s` - see
+	 * RouteTrackerPlugin.captureHpChanges().
+	 */
+	public static RouteEvent hp(int[] at, int maxHp, int[] samples, long start, long end)
+	{
+		RouteEvent ev = new RouteEvent();
+		ev.ty = "hp";
+		ev.t = at;
+		ev.mx = maxHp;
+		ev.hp = samples;
+		ev.s = start;
+		ev.e = end;
 		return ev;
 	}
 }

@@ -52,8 +52,8 @@ import okhttp3.Response;
 @Slf4j
 @PluginDescriptor(
 	name = "Session Movement Tracker",
-	description = "Records a session-by-session timeline of walking, teleports, and bank visits to a local file, with optional GitHub upload",
-	tags = {"route", "tracker", "map", "location", "session", "movement"}
+	description = "Records a session-by-session timeline of walking, teleports, bank visits, XP gains and hitpoints changes to a local file, with optional GitHub upload",
+	tags = {"route", "tracker", "map", "location", "session", "movement", "xp", "hitpoints"}
 )
 public class RouteTrackerPlugin extends Plugin
 {
@@ -113,6 +113,15 @@ public class RouteTrackerPlugin extends Plugin
 	// until the first StatChanged has been seen for that skill.
 	private final Map<Skill, Integer> lastXpBySkill = new EnumMap<>(Skill.class);
 	private final Map<Skill, Integer> pendingXpGains = new EnumMap<>(Skill.class);
+	// Hitpoints as of the last tick, or -1 before the first reading after
+	// login. Compared every tick so only actual changes get recorded.
+	private int lastHp = -1;
+	// Pending hp changes since the last flush, stored flat as
+	// [offsetSeconds, value, ...] relative to pendingHpStart. Emptied by
+	// captureHpChanges() on every flush.
+	private final List<Integer> pendingHpSamples = new ArrayList<>();
+	private long pendingHpStart = 0;
+	private long pendingHpLast = 0;
 	// Guards against two uploads overlapping if one happens to still be in
 	// flight (slow connection, GitHub API hiccup) when the next flush fires.
 	private volatile boolean uploadInProgress = false;
@@ -129,6 +138,11 @@ public class RouteTrackerPlugin extends Plugin
 	// session - e.g. hours of agility-course laps in one unbroken segment -
 	// from growing a single event unboundedly.
 	private static final int MAX_WAYPOINTS_PER_SEGMENT = 2000;
+	// Hard ceiling on hp changes per flush cycle. Hitpoints can only change
+	// once per tick, so at the default 60s save interval this is never
+	// reached in normal play - it just bounds the event if someone sets a
+	// very long save interval.
+	private static final int MAX_HP_SAMPLES_PER_FLUSH = 500;
 	private static final String GITHUB_UPLOAD_PATH_PREFIX = "docs/route-data/";
 
 	private static final DateTimeFormatter MONTH_FMT =
@@ -156,6 +170,7 @@ public class RouteTrackerPlugin extends Plugin
 		ticksSinceUpload = 0;
 		lastXpBySkill.clear();
 		pendingXpGains.clear();
+		resetHpTracking();
 		resetWaypoints();
 		pruneOldLocalData();
 	}
@@ -178,6 +193,7 @@ public class RouteTrackerPlugin extends Plugin
 			flushToDisk(true);
 			lastXpBySkill.clear();
 			pendingXpGains.clear();
+			resetHpTracking();
 			lastTile = null;
 			walkSegmentStart = null;
 			idleTicks = 0;
@@ -278,7 +294,91 @@ public class RouteTrackerPlugin extends Plugin
 			}
 		}
 
+		sampleHp(now);
 		maybeFlush();
+	}
+
+	/**
+	 * Records the current hitpoints if (and only if) they differ from the
+	 * previous tick. The first reading after login is treated as a change
+	 * only when it is below max - starting a session at full health is the
+	 * uninteresting default and writing it would just be noise, but
+	 * starting already damaged is worth knowing.
+	 */
+	private void sampleHp(long now)
+	{
+		if (!config.trackHealth())
+		{
+			return;
+		}
+
+		int hp = client.getBoostedSkillLevel(Skill.HITPOINTS);
+		if (hp <= 0 && lastHp == -1)
+		{
+			return; // stats not populated yet on this login
+		}
+
+		boolean changed;
+		if (lastHp == -1)
+		{
+			changed = hp < client.getRealSkillLevel(Skill.HITPOINTS);
+		}
+		else
+		{
+			changed = hp != lastHp;
+		}
+		lastHp = hp;
+
+		if (!changed || pendingHpSamples.size() / 2 >= MAX_HP_SAMPLES_PER_FLUSH)
+		{
+			return;
+		}
+
+		if (pendingHpSamples.isEmpty())
+		{
+			pendingHpStart = now;
+		}
+		pendingHpSamples.add((int) (now - pendingHpStart));
+		pendingHpSamples.add(hp);
+		pendingHpLast = now;
+	}
+
+	private void resetHpTracking()
+	{
+		lastHp = -1;
+		pendingHpSamples.clear();
+		pendingHpStart = 0;
+		pendingHpLast = 0;
+	}
+
+	/**
+	 * Emits the hp changes accumulated by sampleHp() since the last flush
+	 * as a single event, then clears them. Does nothing when the feature
+	 * is off or health never changed - so an hour at full hp adds no hp
+	 * events at all.
+	 */
+	private void captureHpChanges()
+	{
+		if (!config.trackHealth() || pendingHpSamples.isEmpty() || activeSession == null)
+		{
+			return;
+		}
+		int[] at = currentPositionOrLastKnown();
+		if (at == null)
+		{
+			return;
+		}
+
+		int[] samples = new int[pendingHpSamples.size()];
+		for (int i = 0; i < samples.length; i++)
+		{
+			samples[i] = pendingHpSamples.get(i);
+		}
+		pendingHpSamples.clear();
+
+		activeSession.events.add(RouteEvent.hp(
+			at, client.getRealSkillLevel(Skill.HITPOINTS),
+			samples, pendingHpStart, pendingHpLast));
 	}
 
 	/**
@@ -416,8 +516,8 @@ public class RouteTrackerPlugin extends Plugin
 		{
 			return;
 		}
-		Player localPlayer = client.getLocalPlayer();
-		if (localPlayer == null)
+		int[] at = currentPositionOrLastKnown();
+		if (at == null)
 		{
 			return;
 		}
@@ -426,8 +526,23 @@ public class RouteTrackerPlugin extends Plugin
 		pendingXpGains.forEach((skill, amount) -> gains.put(skill.getName(), amount));
 		pendingXpGains.clear();
 
-		activeSession.events.add(RouteEvent.xp(
-			toArr(localPlayer.getWorldLocation()), gains, Instant.now().getEpochSecond()));
+		activeSession.events.add(RouteEvent.xp(at, gains, Instant.now().getEpochSecond()));
+	}
+
+	/**
+	 * The player's current tile, falling back to the last tile seen on a
+	 * game tick. The local player can already be gone by the time the
+	 * logout flush runs, and without the fallback everything accumulated
+	 * since the previous save would be silently dropped.
+	 */
+	private int[] currentPositionOrLastKnown()
+	{
+		Player localPlayer = client.getLocalPlayer();
+		if (localPlayer != null && localPlayer.getWorldLocation() != null)
+		{
+			return toArr(localPlayer.getWorldLocation());
+		}
+		return lastTile != null ? toArr(lastTile) : null;
 	}
 
 	private void closeSessionCleanly()
@@ -639,6 +754,7 @@ public class RouteTrackerPlugin extends Plugin
 		// whether there's data worth writing - during stationary training
 		// this is the only thing that produces events at all.
 		captureXpDeltas();
+		captureHpChanges();
 
 		if (activeSession == null || activeSession.events.isEmpty())
 		{

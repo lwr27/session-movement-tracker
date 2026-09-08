@@ -43,10 +43,21 @@ public interface RouteTrackerConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "trackHealth",
+		name = "Track hitpoints",
+		description = "Records changes to your current hitpoints, batched once per local save. Only changes are stored, so a session spent at full health writes nothing at all - data is only added while taking damage or healing.",
+		position = 4
+	)
+	default boolean trackHealth()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		keyName = "retentionMonths",
 		name = "Keep local data for (months)",
 		description = "Local route data older than this many months is deleted automatically. Set to 0 to keep everything forever. Only affects files on this computer - anything already uploaded to GitHub is never deleted by this plugin.",
-		position = 4
+		position = 5
 	)
 	default int retentionMonths()
 	{
@@ -58,7 +69,7 @@ public interface RouteTrackerConfig extends Config
 		name = "Enable GitHub upload",
 		description = "Must be turned on, together with filling in the repo and token below, for any network upload to happen. Off by default - with this disabled, everything stays fully local no matter what is in the fields below.",
 		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by Runelite developers.",
-		position = 5
+		position = 6
 	)
 	default boolean enableGithubUpload()
 	{
@@ -69,7 +80,7 @@ public interface RouteTrackerConfig extends Config
 		keyName = "uploadIntervalSeconds",
 		name = "GitHub upload interval (seconds)",
 		description = "How often data is uploaded to GitHub, when uploads are enabled. Deliberately separate from (and normally longer than) the local save interval - local saves are frequent for crash safety, but every upload creates a commit, so uploading as often as saving generates a lot of unnecessary commit history.",
-		position = 6
+		position = 7
 	)
 	default int uploadIntervalSeconds()
 	{
@@ -81,7 +92,7 @@ public interface RouteTrackerConfig extends Config
 		name = "GitHub repo (optional)",
 		description = "owner/repo to upload your route data to, e.g. lwr27/rs. Leave blank to keep everything local-only - nothing is ever sent anywhere unless this, the token below, and the upload toggle above are all filled in/enabled.",
 		warning = "Filling this in (along with the token below and enabling the upload toggle above) will upload your route data - which includes your account hash and every location you visit - to the GitHub repository you specify. Only do this if you trust the destination repo and whoever it belongs to.",
-		position = 7
+		position = 8
 	)
 	default String githubRepo()
 	{
@@ -93,7 +104,7 @@ public interface RouteTrackerConfig extends Config
 		name = "GitHub token (optional)",
 		description = "A GitHub Personal Access Token with permission to write to the repo above (needs the 'contents: write' permission, or classic 'repo' scope). Kept masked and stored locally only - never uploaded or shared anywhere except as the auth header on the upload request itself.",
 		secret = true,
-		position = 8
+		position = 9
 	)
 	default String githubToken()
 	{
