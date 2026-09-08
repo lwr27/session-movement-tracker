@@ -91,7 +91,7 @@ public interface RouteTrackerConfig extends Config
 		keyName = "githubRepo",
 		name = "GitHub repo (optional)",
 		description = "owner/repo to upload your route data to, e.g. lwr27/rs. Leave blank to keep everything local-only - nothing is ever sent anywhere unless this, the token below, and the upload toggle above are all filled in/enabled.",
-		warning = "Filling this in (along with the token below and enabling the upload toggle above) will upload your route data - which includes your account hash and every location you visit - to the GitHub repository you specify. Only do this if you trust the destination repo and whoever it belongs to.",
+		warning = "Filling this in (along with the token below and enabling the upload toggle above) will upload your route data - which includes your account hash, every location you visit, and (if enabled) your XP gains and hitpoints changes - to the GitHub repository you specify. Only do this if you trust the destination repo and whoever it belongs to.",
 		position = 8
 	)
 	default String githubRepo()
