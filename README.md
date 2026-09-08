@@ -90,6 +90,10 @@ ever viewed back retrospectively, never watched live. Leave either
 field blank and everything stays fully local; this is entirely
 optional and off by default.
 
+If the same account is tracked from more than one computer, each
+upload merges with whatever is already on GitHub for that day rather
+than replacing it, so sessions recorded on another machine are kept.
+
 **Be aware:** if enabled, this uploads your account hash and every
 location you visit to the repository you specify. Only point it at a
 repo you control and trust.
