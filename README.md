@@ -12,6 +12,8 @@ interactive map, but the recorded data is plain, readable JSON and
 useful on its own for anyone who wants a private log of where they went
 and when.
 
+![Example of a session replaying on the companion map, showing the route, an HP/XP HUD, and place-name search](docs-assets/example-map.png)
+
 ## What it tracks
 
 For each play session (login to logout), the plugin records a
